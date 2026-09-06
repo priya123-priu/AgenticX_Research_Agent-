@@ -37,31 +37,26 @@ MAX_STEPS = 6
 # ============================================================
 
 class AgentState(TypedDict):
-
     question: str
-
     selected_tool: str
-
     search_results: str
-
     fetched_sources: List[str]
-
+    source_urls: List[str]
+    source_titles: List[str]
     summaries: List[str]
-
     final_answer: str
-
     steps: int
 
 
 # ============================================================
-# NODE 1: AGENT DECIDES WHICH TOOL TO USE
+# NODE 1: DECIDE TOOL
 # ============================================================
 
 def decide_tool_node(state: AgentState):
 
-    question = state["question"]
-
     print("\n🧠 Agent deciding which tool to use...")
+
+    question = state["question"]
 
     prompt = f"""
 You are a research agent.
@@ -71,37 +66,32 @@ User question:
 
 Available tools:
 
-1. SEARCH
-Use SEARCH when you need to find information or sources
-on the web.
+SEARCH:
+Use this when you need to find information on the web.
 
-2. FETCH
-Use FETCH when you already have a webpage URL and need
-the actual webpage content.
+FETCH:
+Use this when a webpage URL is already available and
+you need the webpage content.
 
-Choose exactly ONE tool.
+Choose exactly one.
 
-Return ONLY one word:
+Return only:
 SEARCH
 or
 FETCH
 """
 
     try:
-
         response = llm.invoke(prompt)
 
         decision = response.content.strip().upper()
 
         if "FETCH" in decision:
             selected_tool = "fetch"
-
         else:
             selected_tool = "search"
 
     except Exception:
-
-        # Safe fallback
         selected_tool = "search"
 
     print(f"🔧 Selected tool: {selected_tool}")
@@ -129,60 +119,70 @@ def search_node(state: AgentState):
 
         return {
             "search_results": "",
+            "source_urls": [],
+            "source_titles": [],
             "steps": state["steps"] + 1
         }
 
+    # Extract source URLs and titles
+    lines = result.splitlines()
+
+    urls = []
+    titles = []
+
+    for line in lines:
+
+        if line.startswith("Title:"):
+            title = line.replace(
+                "Title:",
+                ""
+            ).strip()
+
+            titles.append(title)
+
+        elif line.startswith("URL:"):
+            url = line.replace(
+                "URL:",
+                ""
+            ).strip()
+
+            if url:
+                urls.append(url)
+
+    print(f"📚 Sources found: {len(urls)}")
+
     return {
         "search_results": result,
+        "source_urls": urls,
+        "source_titles": titles,
         "steps": state["steps"] + 1
     }
 
 
 # ============================================================
-# NODE 3: FETCH WEBPAGE
+# NODE 3: FETCH SOURCE
 # ============================================================
 
 def fetch_node(state: AgentState):
 
     print("\n🌐 Running fetch tool...")
 
-    search_results = state["search_results"]
+    urls = state["source_urls"]
 
-    if not search_results:
+    if not urls:
 
-        print("⚠️ No search results available.")
-
-        return {
-            "fetched_sources": [],
-            "steps": state["steps"] + 1
-        }
-
-    # Find first URL from search results
-    lines = search_results.splitlines()
-
-    url = None
-
-    for line in lines:
-
-        if line.startswith("URL:"):
-
-            url = line.replace(
-                "URL:",
-                ""
-            ).strip()
-
-            break
-
-    if not url:
-
-        print("⚠️ No URL found.")
+        print("⚠️ No source URL available.")
 
         return {
             "fetched_sources": [],
             "steps": state["steps"] + 1
         }
 
-    print(f"📄 Fetching: {url}")
+    # Fetch first source
+    url = urls[0]
+
+    print(f"📄 Fetching source:")
+    print(url)
 
     page = fetch_page(url)
 
@@ -243,7 +243,7 @@ def summarise_node(state: AgentState):
 
 
 # ============================================================
-# NODE 5: FINAL ANSWER
+# NODE 5: FINAL ANSWER WITH SOURCES
 # ============================================================
 
 def final_answer_node(state: AgentState):
@@ -253,6 +253,10 @@ def final_answer_node(state: AgentState):
     question = state["question"]
 
     summaries = state["summaries"]
+
+    urls = state["source_urls"]
+
+    titles = state["source_titles"]
 
     if not summaries:
 
@@ -268,8 +272,8 @@ def final_answer_node(state: AgentState):
     prompt = f"""
 You are a research assistant.
 
-Answer the following research question using ONLY
-the provided source evidence.
+Answer the research question using ONLY the provided
+source evidence.
 
 Research Question:
 {question}
@@ -278,20 +282,44 @@ Source Evidence:
 {evidence}
 
 Rules:
-
 1. Do not invent facts.
-2. Do not use information outside the evidence.
-3. Give a clear and concise answer.
-4. If evidence is insufficient, say so.
-5. Mention that the answer is based on the fetched source.
+2. Do not use outside knowledge.
+3. Every factual claim must be supported by the evidence.
+4. If the evidence is insufficient, clearly say so.
+5. Give a concise and useful answer.
 """
 
     try:
 
         response = llm.invoke(prompt)
 
+        answer = response.content
+
+        # Add source section
+        source_section = "\n\n### Sources\n"
+
+        for i, url in enumerate(urls):
+
+            if i < len(titles):
+
+                title = titles[i]
+
+            else:
+
+                title = "Source"
+
+            source_section += (
+                f"\n[{i + 1}] {title}\n"
+                f"{url}\n"
+            )
+
+        final_output = (
+            answer +
+            source_section
+        )
+
         return {
-            "final_answer": response.content
+            "final_answer": final_output
         }
 
     except Exception as e:
@@ -304,7 +332,7 @@ Rules:
 
 
 # ============================================================
-# ROUTING: AGENT TOOL DECISION
+# ROUTING
 # ============================================================
 
 def route_tool(state: AgentState):
@@ -315,9 +343,7 @@ def route_tool(state: AgentState):
 
         return "final"
 
-    selected_tool = state["selected_tool"]
-
-    if selected_tool == "fetch":
+    if state["selected_tool"] == "fetch":
 
         return "fetch"
 
@@ -331,7 +357,6 @@ def route_tool(state: AgentState):
 graph = StateGraph(AgentState)
 
 
-# Add nodes
 graph.add_node(
     "decide",
     decide_tool_node
@@ -362,7 +387,7 @@ graph.add_node(
 graph.set_entry_point("decide")
 
 
-# Agent decides between tools
+# Decide → Search OR Fetch
 graph.add_conditional_edges(
     "decide",
     route_tool,
@@ -402,12 +427,12 @@ graph.add_edge(
 )
 
 
-# Compile graph
+# Compile
 research_agent = graph.compile()
 
 
 # ============================================================
-# RUN RESEARCH AGENT
+# RUN AGENT
 # ============================================================
 
 def run_research_agent(question: str):
@@ -421,6 +446,10 @@ def run_research_agent(question: str):
         "search_results": "",
 
         "fetched_sources": [],
+
+        "source_urls": [],
+
+        "source_titles": [],
 
         "summaries": [],
 
@@ -473,8 +502,5 @@ if __name__ == "__main__":
         print("\n========================================")
         print(
             f"Steps used: {result['steps']}"
-        )
-        print(
-            f"Tool selected: {result['selected_tool']}"
         )
         print("========================================")
